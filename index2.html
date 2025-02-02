@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Transferência de Arquivos P2P com WebRTC</title>
+  <style>
+    /* Adicione aqui seu estilo conforme o padrão fornecido */
+    #downloads {
+      margin-top: 20px;
+    }
+
+    .file-item {
+      margin-bottom: 10px;
+      padding: 10px;
+      border: 1px solid #ccc;
+      border-radius: 5px;
+    }
+
+    .progress-bar {
+      width: 100%;
+      height: 20px;
+      background-color: #f3f3f3;
+      border-radius: 5px;
+      overflow: hidden;
+      margin: 5px 0;
+    }
+
+    .progress {
+      height: 100%;
+      background-color: #76c7c0;
+      width: 0%;
+    }
+
+    .download-button {
+      margin-top: 10px;
+      padding: 5px 10px;
+      background-color: #28a745;
+      color: white;
+      border: none;
+      border-radius: 5px;
+      cursor: pointer;
+    }
+
+    .download-button:disabled {
+      background-color: #ccc;
+      cursor: not-allowed;
+    }
+  </style>
+</head>
+
+<body>
+  <h1>Transferência de Arquivos P2P com WebRTC</h1>
+  <input type="text" id="codeInput" placeholder="Digite o código">
+  <button onclick="joinRoom()">Entrar na Sala</button>
+  <br><br>
+  <input type="file" id="fileInput" disabled>
+  <button onclick="sendFile()" disabled>Enviar Arquivo</button>
+  <div id="downloads"></div>
+
+  <script>
+    const socket = new WebSocket('ws://localhost:3000'); // Conectar-se ao servidor WebSocket
+    let localConnection;
+    let remoteConnection;
+    let sendChannel;
+    let receiveChannel;
+    let iceCandidatesQueue = [];
+    let roomCode = null;
+
+    socket.onopen = () => {
+      console.log('Conectado ao servidor WebSocket');
+    };
+
+    socket.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      console.log('Mensagem recebida: ', data);
+
+      // Verificando se a mensagem é do tipo 'join-room'
+      if (data.type === 'join-room') {
+        console.log('Cliente entrou na sala: ' + data.roomCode);
+      }
+
+      // Lógica de oferta
+      if (data.type === 'offer') {
+        if (!remoteConnection) {
+          console.log("Inicializando remoteConnection...");
+          createPeerConnection();
+        }
+
+        // Definindo a descrição remota da oferta recebida
+        remoteConnection.setRemoteDescription(new RTCSessionDescription(data.offer))
+          .then(() => remoteConnection.createAnswer())  // Criando resposta
+          .then((answer) => remoteConnection.setLocalDescription(answer))  // Definindo descrição local
+          .then(() => {
+            socket.send(JSON.stringify({
+              type: 'answer',
+              target: data.target,
+              answer: remoteConnection.localDescription
+            }));
+          })
+          .catch((error) => console.error('Erro ao processar a oferta: ', error));
+      }
+
+      // Lógica de resposta
+      if (data.type === 'answer') {
+        if (localConnection) {
+          localConnection.setRemoteDescription(new RTCSessionDescription(data.answer))
+            .catch((error) => console.error('Erro ao definir resposta remota: ', error));
+        }
+      }
+
+      // Lógica para candidatos ICE
+      if (data.type === 'ice-candidate') {
+        const candidate = new RTCIceCandidate(data.candidate);
+
+        if (!localConnection.remoteDescription) {
+          // Se a descrição remota não estiver definida, armazenar candidatos para adicionar mais tarde
+          iceCandidatesQueue.push(candidate);
+        } else {
+          // Se a descrição remota já foi configurada, adicionar o candidato diretamente
+          if (localConnection) {
+            localConnection.addIceCandidate(candidate).catch((error) => console.error('Erro ao adicionar candidato ICE:', error));
+          }
+          if (remoteConnection) {
+            remoteConnection.addIceCandidate(candidate).catch((error) => console.error('Erro ao adicionar candidato ICE na remoteConnection:', error));
+          }
+        }
+      }
+    };
+
+
+    // Função para entrar na sala
+    function joinRoom() {
+      roomCode = document.getElementById('codeInput').value;
+      socket.send(JSON.stringify({ type: 'join-room', roomCode }));
+    }
+
+    // Função para criar a conexão Peer-to-Peer
+    function createPeerConnection(remoteId) {
+      console.log('Criando conexões P2P');
+      localConnection = new RTCPeerConnection();
+      remoteConnection = new RTCPeerConnection();
+
+      sendChannel = localConnection.createDataChannel('sendDataChannel');
+      sendChannel.onopen = () => console.log('Canal de envio aberto');
+      sendChannel.onclose = () => console.log('Canal de envio fechado');
+
+      remoteConnection.ondatachannel = (event) => {
+        receiveChannel = event.channel;
+        receiveChannel.onmessage = handleReceiveMessage;
+      };
+
+      localConnection.onicecandidate = (event) => {
+        if (event.candidate) {
+          socket.send(JSON.stringify({ type: 'ice-candidate', target: remoteId, candidate: event.candidate }));
+        }
+      };
+
+      remoteConnection.onicecandidate = (event) => {
+        if (event.candidate) {
+          socket.send(JSON.stringify({ type: 'ice-candidate', target: remoteId, candidate: event.candidate }));
+        }
+      };
+
+      localConnection.createOffer()
+        .then((offer) => {
+          return localConnection.setLocalDescription(offer);
+        })
+        .then(() => {
+          socket.send(JSON.stringify({ type: 'offer', target: remoteId, offer: localConnection.localDescription }));
+        })
+        .catch((error) => console.error('Erro ao criar oferta: ', error));
+    }
+
+    // Função para enviar o arquivo
+    function sendFile() {
+      const fileInput = document.getElementById('fileInput');
+      const fileReader = new FileReader();
+
+      const file = fileInput.files[0];
+      fileReader.onload = (event) => {
+        sendChannel.send(event.target.result);
+      };
+      fileReader.readAsArrayBuffer(file);
+    }
+
+    // Função para lidar com mensagens recebidas
+    function handleReceiveMessage(event) {
+      const fileData = event.data;
+      const fileName = 'received_file';
+      const blob = new Blob([fileData], { type: 'application/octet-stream' });
+      const downloadLink = document.createElement('a');
+      downloadLink.href = URL.createObjectURL(blob);
+      downloadLink.download = fileName;
+      downloadLink.click();
+    }
+
+
+  </script>
+</body>
+
+</html>

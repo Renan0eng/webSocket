@@ -1,5 +1,5 @@
 {
-  "name": "websocket",
+  "name": "p2p-file-transfer",
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
@@ -11,7 +11,7 @@
   "description": "",
   "dependencies": {
     "express": "^4.21.2",
-    "socket.io": "^4.8.1",
-    "ws": "^8.18.0"
+    "simple-peer": "^9.11.1",
+    "socket.io": "^4.8.1"
   }
 }
