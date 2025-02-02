@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Troca de Arquivos com Código</title>
+  <style>
+    #downloads {
+      margin-top: 20px;
+    }
+
+    .file-item {
+      margin-bottom: 10px;
+      padding: 10px;
+      border: 1px solid #ccc;
+      border-radius: 5px;
+    }
+
+    .progress-bar {
+      width: 100%;
+      height: 20px;
+      background-color: #f3f3f3;
+      border-radius: 5px;
+      overflow: hidden;
+      margin: 5px 0;
+    }
+
+    .progress {
+      height: 100%;
+      background-color: #76c7c0;
+      width: 0%;
+    }
+
+    .download-button {
+      margin-top: 10px;
+      padding: 5px 10px;
+      background-color: #28a745;
+      color: white;
+      border: none;
+      border-radius: 5px;
+      cursor: pointer;
+    }
+
+    .download-button:disabled {
+      background-color: #ccc;
+      cursor: not-allowed;
+    }
+  </style>
+</head>
+
+<body>
+  <h1>Troca de Arquivos com Código</h1>
+  <input type="text" id="codeInput" placeholder="Digite o código">
+  <button onclick="joinRoom()">Entrar na Sala</button>
+  <br><br>
+  <input type="file" id="fileInput" disabled>
+  <button onclick="sendFile()" disabled>Enviar Arquivo</button>
+  <div id="downloads"></div>
+
+  <script>
+    const socket = new WebSocket('ws://localhost:8080');
+    let currentCode = '';
+    const CHUNK_SIZE = 64 * 1024; // 64 KB por chunk
+
+    // Função para entrar na sala
+    function joinRoom() {
+      const code = document.getElementById('codeInput').value;
+      if (code) {
+        currentCode = code;
+        socket.send(JSON.stringify({ type: 'join', code: code }));
+        document.getElementById('fileInput').disabled = false;
+        document.querySelector('button[onclick="sendFile()"]').disabled = false;
+      } else {
+        alert('Por favor, insira um código.');
+      }
+    }
+
+    // Função para enviar arquivo em chunks
+    function sendFile() {
+      const fileInput = document.getElementById('fileInput');
+      const file = fileInput.files[0];
+
+      if (file) {
+        // Adiciona o arquivo à lista de downloads com barra de progresso
+        addFileToDownloads(file.name, true);
+
+        const reader = new FileReader();
+        let offset = 0;
+
+        reader.onload = (event) => {
+          const chunk = event.target.result;
+          socket.send(JSON.stringify({
+            type: 'file-chunk',
+            code: currentCode,
+            chunk: Array.from(new Uint8Array(chunk)),
+            fileName: file.name,
+            isLastChunk: offset + CHUNK_SIZE >= file.size,
+            fileSize: file.size, // Tamanho total do arquivo
+            uploadedBytes: offset // Bytes já enviados
+          }));
+
+          offset += CHUNK_SIZE;
+
+          // Atualiza a barra de progresso de upload no frontend
+          const progress = Math.min((offset / file.size) * 100, 100);
+          updateProgress(file.name, progress, true);
+
+          if (offset < file.size) {
+            readNextChunk(reader, file, offset);
+          } else {
+            console.log('Arquivo enviado com sucesso!');
+          }
+        };
+
+        readNextChunk(reader, file, offset);
+      } else {
+        alert('Por favor, selecione um arquivo.');
+      }
+    }
+
+    // Função para ler o próximo chunk
+    function readNextChunk(reader, file, offset) {
+      const chunk = file.slice(offset, offset + CHUNK_SIZE);
+      reader.readAsArrayBuffer(chunk);
+    }
+
+    // Recebe chunks de arquivo e reconstrói o arquivo
+    let receivedChunks = [];
+    let receivedFileName = '';
+
+    socket.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+
+      if (data.type === 'ready') {
+        alert(data.message);
+      }
+
+      if (data.type === 'file-chunk') {
+        console.log("data: ", data);
+
+        if (!receivedFileName) {
+          receivedFileName = data.fileName;
+          // Adiciona o arquivo à lista de downloads com barra de progresso
+          addFileToDownloads(receivedFileName, false);
+        }
+
+        receivedChunks.push(new Uint8Array(data.chunk));
+
+        // Atualiza a barra de progresso de download
+        const progress = (receivedChunks.length * CHUNK_SIZE / data.fileSize) * 100;
+        updateProgress(receivedFileName, progress, false);
+
+        // Exibe o progresso de upload (para o cliente que está recebendo)
+        if (data.uploadProgress !== undefined) {
+          updateUploadProgress(receivedFileName, data.uploadProgress);
+        }
+
+        // Se for o último chunk, reconstrua o arquivo
+        if (data.isLastChunk) {
+          const file = new Blob(receivedChunks, { type: 'application/octet-stream' });
+          const url = URL.createObjectURL(file);
+
+          // Atualiza o botão de download
+          enableDownloadButton(receivedFileName, url);
+
+          // Limpa os chunks recebidos para o próximo arquivo
+          receivedChunks = [];
+          receivedFileName = '';
+        }
+      }
+    };
+
+    // Função para adicionar arquivo à lista de downloads
+    function addFileToDownloads(fileName, isUpload) {
+      const downloadsDiv = document.getElementById('downloads');
+      const fileItem = document.createElement('div');
+      fileItem.className = 'file-item';
+      fileItem.innerHTML = `
+        <strong>${fileName}</strong> (${isUpload ? 'Upload' : 'Download'})
+        <div>Progresso de ${isUpload ? 'Upload' : 'Download'}: <span id="progress-text-${fileName.replace(/ /g, '-')}">0%</span></div>
+        <div class="progress-bar">
+            <div class="progress" id="progress-${fileName.replace(/ /g, '-')}"></div>
+        </div>
+        <button class="download-button" id="download-${fileName.replace(/ /g, '-')}" disabled>Baixar</button>
+    `;
+      downloadsDiv.appendChild(fileItem);
+    }
+
+    // Função para atualizar a barra de progresso
+    function updateProgress(fileName, progress, isUpload) {
+      console.log("progress", progress);
+
+      const progressBar = document.getElementById(`progress-${fileName.replace(/ /g, '-')}`);
+      if (progressBar) {
+        progressBar.style.width = `${progress}%`;
+      }
+
+      // Atualiza o texto de progresso
+      const progressText = document.getElementById(`progress-text-${fileName.replace(/ /g, '-')}`);
+      if (progressText) {
+        progressText.textContent = `${progress.toFixed(2)}%`;
+      }
+
+      // Mostra o botão de download quando o upload estiver completo
+      if (isUpload && progress >= 100) {
+        const downloadButton = document.getElementById(`download-${fileName.replace(/ /g, '-')}`);
+        if (downloadButton) {
+          downloadButton.disabled = false;
+        }
+      }
+    }
+
+    // Função para atualizar o progresso de upload
+    function updateUploadProgress(fileName, progress) {
+      const uploadProgressElement = document.getElementById(`upload-progress-${fileName.replace(/ /g, '-')}`);
+      if (uploadProgressElement) {
+        uploadProgressElement.textContent = `${progress.toFixed(2)}%`;
+      }
+    }
+
+    // Função para habilitar o botão de download
+    function enableDownloadButton(fileName, url) {
+      const downloadButton = document.getElementById(`download-${fileName.replace(/ /g, '-')}`);
+      if (downloadButton) {
+        downloadButton.disabled = false;
+        downloadButton.onclick = () => {
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = fileName;
+          a.click();
+        };
+      }
+    }
+  </script>
+</body>
+
+</html>
